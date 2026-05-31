@@ -22,6 +22,7 @@ from PyQt5.QtGui import QFont, QPalette, QColor, QDragEnterEvent, QDropEvent
 
 from attendance_processor import AttendanceProcessor
 from dormitory_processor import process_allocation, parse_billing_month_from_filename
+from inventory_processor import process_inventory
 
 DEFAULT_EXCLUDE_NAMES = ["李诚维", "李天龙"]
 
@@ -658,9 +659,250 @@ class DormitoryTab(QWidget):
             os.startfile(self.last_output_dir)
 
 
+class InventoryWorker(QThread):
+    progress = pyqtSignal(int, int, str)
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, input_path, output_path):
+        super().__init__()
+        self.input_path = input_path
+        self.output_path = output_path
+
+    def run(self):
+        try:
+            result = process_inventory(
+                self.input_path, self.output_path,
+                progress_callback=lambda c, t, m: self.progress.emit(c, t, m)
+            )
+            self.finished.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
-#  主窗口
+#  标签页 3: 出入库流水清洗
 # ══════════════════════════════════════════════════════════════════════════════
+
+class InventoryTab(QWidget):
+    def __init__(self, log_writer):
+        super().__init__()
+        self.log = log_writer
+        self.worker = None
+        self.last_output_path = None
+        self.current_input = None
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 12, 20, 12)
+        layout.setSpacing(8)
+
+        section1 = QLabel("① 出入库流水 Excel 文件")
+        section1.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+        section1.setStyleSheet("color: #333;")
+        layout.addWidget(section1)
+
+        self.drop_zone = DropZone("📂", "将出入库流水 XLSX 文件拖拽到此处\n或点击选择文件")
+        self.drop_zone.file_dropped.connect(self.on_file_selected)
+        layout.addWidget(self.drop_zone)
+
+        self.file_label = QLabel("未选择文件")
+        self.file_label.setFont(QFont("Microsoft YaHei", 8))
+        self.file_label.setStyleSheet("color: #999; padding: 1px 4px;")
+        self.file_label.setWordWrap(True)
+        layout.addWidget(self.file_label)
+
+        self.select_btn = QPushButton("  选择出入库流水文件...")
+        self.select_btn.setFont(QFont("Microsoft YaHei", 9))
+        self.select_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4472C4; color: white; border: none;
+                border-radius: 5px; padding: 6px 14px;
+            }
+            QPushButton:hover { background-color: #365A9E; }
+        """)
+        self.select_btn.clicked.connect(self.browse_file)
+        layout.addWidget(self.select_btn)
+
+        sep = QFrame(); sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("color: #E0E0E0;")
+        layout.addWidget(sep)
+
+        section2 = QLabel("② 输出设置")
+        section2.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+        section2.setStyleSheet("color: #333;")
+        layout.addWidget(section2)
+
+        out_layout = QHBoxLayout()
+        out_layout.addWidget(QLabel("输出路径:"))
+        self.output_edit = QLineEdit()
+        self.output_edit.setReadOnly(True)
+        self.output_edit.setPlaceholderText("自动生成（与输入文件同目录）")
+        out_layout.addWidget(self.output_edit)
+        self.output_browse_btn = QPushButton("选择...")
+        self.output_browse_btn.clicked.connect(self.browse_output)
+        out_layout.addWidget(self.output_browse_btn)
+        layout.addLayout(out_layout)
+
+        layout.addSpacing(6)
+
+        # 按钮
+        btn_layout = QHBoxLayout()
+        self.process_btn = QPushButton("  开始清洗")
+        self.process_btn.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+        self.process_btn.setEnabled(False)
+        self.process_btn.setMinimumHeight(36)
+        self.process_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2B8C3C; color: white; border: none;
+                border-radius: 6px; padding: 8px 32px;
+            }
+            QPushButton:hover { background-color: #237030; }
+            QPushButton:disabled { background-color: #C0C0C0; color: #F0F0F0; }
+        """)
+        self.process_btn.clicked.connect(self.start_processing)
+        btn_layout.addWidget(self.process_btn)
+
+        self.open_btn = QPushButton("  打开输出文件")
+        self.open_btn.setFont(QFont("Microsoft YaHei", 9))
+        self.open_btn.setEnabled(False)
+        self.open_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #E8ECF2; color: #333; border: 1px solid #C0C0C0;
+                border-radius: 5px; padding: 6px 14px;
+            }
+            QPushButton:hover { background-color: #D4DAE4; }
+            QPushButton:disabled { color: #C0C0C0; }
+        """)
+        self.open_btn.clicked.connect(self.open_output)
+        btn_layout.addWidget(self.open_btn)
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+
+        # 进度条
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #D0D0D0; border-radius: 5px; text-align: center;
+                background-color: #F0F0F0; height: 20px;
+                font-family: "Microsoft YaHei"; font-size: 9px;
+            }
+            QProgressBar::chunk {
+                background-color: #4472C4; border-radius: 4px;
+            }
+        """)
+        layout.addWidget(self.progress_bar)
+
+        self.status_label = QLabel("就绪")
+        self.status_label.setFont(QFont("Microsoft YaHei", 9))
+        self.status_label.setStyleSheet("color: #888;")
+        layout.addWidget(self.status_label)
+        layout.addStretch()
+
+    def browse_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择出入库流水文件", os.path.expanduser("~"),
+            "Excel 文件 (*.xlsx *.xls);;所有文件 (*.*)")
+        if path:
+            self.on_file_selected(path)
+
+    def browse_output(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "保存输出文件", os.path.expanduser("~"),
+            "Excel 文件 (*.xlsx);;所有文件 (*.*)")
+        if path:
+            self.output_edit.setText(path)
+
+    def on_file_selected(self, path):
+        if path == "__browse__":
+            self.browse_file(); return
+        self.current_input = path
+        self.file_label.setText(f"已选择: {os.path.basename(path)}")
+        self.file_label.setStyleSheet("color: #2B579A; padding: 1px 4px;")
+        self.process_btn.setEnabled(True)
+        self.log(f"[出入库] 文件: {path}")
+
+    def start_processing(self):
+        if not self.current_input:
+            return
+        input_path = self.current_input
+        output_path = self.output_edit.text().strip() or None
+
+        self.process_btn.setEnabled(False)
+        self.select_btn.setEnabled(False)
+        self.output_browse_btn.setEnabled(False)
+        self.open_btn.setEnabled(False)
+        self.progress_bar.setValue(0)
+        self.status_label.setText("处理中...")
+        self.status_label.setStyleSheet("color: #2B579A; font-weight: bold;")
+        self.log("=" * 40)
+        self.log("[出入库] 开始清洗...")
+
+        self.worker = InventoryWorker(input_path, output_path)
+        self.worker.progress.connect(self.on_progress)
+        self.worker.finished.connect(self.on_finished)
+        self.worker.error.connect(self.on_error)
+        self.worker.start()
+
+    def on_progress(self, current, total, message):
+        pct = int(current / total * 100) if total else 0
+        self.progress_bar.setValue(pct)
+        self.status_label.setText(message)
+        if message:
+            self.log(f"[出入库] {message}")
+
+    def on_finished(self, result):
+        self.progress_bar.setValue(100)
+        self.status_label.setText("处理完成！")
+        self.status_label.setStyleSheet("color: #2B8C3C; font-weight: bold;")
+        self.process_btn.setEnabled(True)
+        self.select_btn.setEnabled(True)
+        self.output_browse_btn.setEnabled(True)
+        self.open_btn.setEnabled(True)
+        self.last_output_path = result['output_path']
+        self.output_edit.setText(result['output_path'])
+
+        self.log("-" * 40)
+        self.log("[出入库] 清洗完成！")
+        self.log(f"  筛选前: {result['raw_count']} 条 → 材料出库单: {result['filtered_count']} 条")
+        self.log(f"  部门映射: {result['mapped_count']} 条匹配, {result['other_count']} 条归入'其他'")
+        self.log(f"  存货种类: {result['inventory_count']} 种")
+        self.log(f"  出库金额合计: {result['total_amount']:,.2f} 元")
+        dept_info = result.get('dept_info', {})
+        for dn in ['VCP', '曝光', '蚀刻', '品质', '其他']:
+            if dn in dept_info:
+                d = dept_info[dn]
+                if d['count'] > 0:
+                    self.log(f"  [{dn}] {d['count']} 条, 金额 {d['amount']:,.2f}")
+                else:
+                    self.log(f"  [{dn}] 无数据")
+        self.log(f"  输出: {os.path.basename(result['output_path'])}")
+
+        QMessageBox.information(
+            self, "完成",
+            f"出入库流水清洗完成！\n\n"
+            f"材料出库单: {result['filtered_count']} 条\n"
+            f"存货种类: {result['inventory_count']} 种\n"
+            f"出库金额合计: {result['total_amount']:,.2f} 元\n\n"
+            f"输出文件:\n{result['output_path']}"
+        )
+
+    def on_error(self, msg):
+        self.progress_bar.setValue(0)
+        self.status_label.setText("出错！")
+        self.status_label.setStyleSheet("color: #CC0000; font-weight: bold;")
+        self.process_btn.setEnabled(True)
+        self.select_btn.setEnabled(True)
+        self.output_browse_btn.setEnabled(True)
+        self.log(f"[出入库] 错误: {msg}")
+        QMessageBox.critical(self, "错误", f"处理失败:\n{msg}")
+
+    def open_output(self):
+        if self.last_output_path and os.path.exists(self.last_output_path):
+            os.startfile(self.last_output_path)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -668,9 +910,9 @@ class MainWindow(QMainWindow):
         self.init_ui()
 
     def init_ui(self):
-        self.setWindowTitle("考勤与宿舍管理工具集")
-        self.setMinimumSize(600, 680)
-        self.resize(620, 720)
+        self.setWindowTitle("HR 管理工具集 — 考勤 · 宿舍 · 出入库")
+        self.setMinimumSize(640, 700)
+        self.resize(660, 740)
 
         palette = self.palette()
         palette.setColor(QPalette.Window, QColor("#FFFFFF"))
@@ -683,7 +925,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(0)
 
         # 标题
-        title = QLabel("考勤与宿舍管理工具集")
+        title = QLabel("HR 管理工具集")
         title.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("color: #2B579A; padding: 4px 0;")
@@ -732,8 +974,10 @@ class MainWindow(QMainWindow):
         # 添加标签页
         self.attendance_tab = AttendanceTab(self._log)
         self.dormitory_tab = DormitoryTab(self._log)
+        self.inventory_tab = InventoryTab(self._log)
         self.tabs.addTab(self.attendance_tab, "📋 考勤汇总")
         self.tabs.addTab(self.dormitory_tab, "🏠 宿舍分摊")
+        self.tabs.addTab(self.inventory_tab, "📦 出入库流水")
 
         self.setStyleSheet("QMainWindow { background-color: #FFFFFF; }")
 
