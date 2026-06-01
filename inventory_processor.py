@@ -238,16 +238,21 @@ def _generate_excel(df, summary, output_path):
 
     # ---- 汇总表 ----
     ws_summary = wb.create_sheet('汇总')
-    summary_cols = ['存货', '出库金额合计']
+    summary_cols = ['存货', '总数量', '平均单价', '出库金额合计']
     ws_summary.append(summary_cols)
     style_header(ws_summary, len(summary_cols))
 
     for _, row_data in summary.iterrows():
-        ws_summary.append([row_data['存货'], round(row_data['出库金额合计'], 2)])
+        qty = round(row_data['出库数量合计'], 2)
+        amt = round(row_data['出库金额合计'], 2)
+        avg_price = round(amt / qty, 2) if qty != 0 else 0
+        ws_summary.append([row_data['存货'], qty, avg_price, amt])
 
     total_row = len(summary) + 2
+    total_qty = round(summary['出库数量合计'].sum(), 2)
     total_amount = round(summary['出库金额合计'].sum(), 2)
-    ws_summary.append(['合计', total_amount])
+    total_avg = round(total_amount / total_qty, 2) if total_qty != 0 else 0
+    ws_summary.append(['合计', total_qty, total_avg, total_amount])
     for col in range(1, len(summary_cols) + 1):
         cell = ws_summary.cell(row=total_row, column=col)
         cell.font = total_font
@@ -258,6 +263,8 @@ def _generate_excel(df, summary, output_path):
     for r in range(2, total_row):
         style_data_cell(ws_summary, r, 1, 'left')
         style_data_cell(ws_summary, r, 2, 'right')
+        style_data_cell(ws_summary, r, 3, 'right')
+        style_data_cell(ws_summary, r, 4, 'right')
     auto_width(ws_summary)
     ws_summary.freeze_panes = 'A2'
 
