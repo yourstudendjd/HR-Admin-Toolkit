@@ -276,7 +276,7 @@ def _generate_excel(df, summary, output_path):
     # ---- 分部门明细 ----
     available_cols = [c for c in OUTPUT_COLUMNS if c in df.columns]
     summary_header_col = 14  # N列
-    dept_summary_cols = ['存货', '总数量', '平均单价', '总出库金额']
+    dept_summary_cols = ['存货', '计量单位', '总数量', '平均单价', '总出库金额']
 
     for dept_name in DEPT_SHEET_ORDER:
         ws_dept = wb.create_sheet(dept_name)
@@ -355,6 +355,7 @@ def _generate_excel(df, summary, output_path):
         dept_inv = dept_df.groupby('存货').agg(
             总数量=('出库数量', 'sum'),
             总出库金额=('出库金额', 'sum'),
+            计量单位=('计量单位', 'first'),
         ).reset_index()
         dept_inv['平均单价'] = (dept_inv['总出库金额'] / dept_inv['总数量'].replace(0, None)).round(2)
         dept_inv['总数量'] = dept_inv['总数量'].round(2)
@@ -363,20 +364,25 @@ def _generate_excel(df, summary, output_path):
 
         for ri, (_, inv_row) in enumerate(dept_inv.iterrows()):
             row_num = ri + 2
-            vals = [inv_row['存货'], inv_row['总数量'], inv_row['平均单价'], inv_row['总出库金额']]
+            vals = [inv_row['存货'], inv_row['计量单位'], inv_row['总数量'], inv_row['平均单价'], inv_row['总出库金额']]
             for ci, val in enumerate(vals):
                 c = summary_header_col + ci
                 ws_dept.cell(row=row_num, column=c, value=val)
                 cell = ws_dept.cell(row=row_num, column=c)
                 cell.font = data_font
                 cell.border = thin_border
-                cell.alignment = right_align if ci > 0 else left_align
+                if ci == 1:
+                    cell.alignment = center_align
+                elif ci > 0:
+                    cell.alignment = right_align
+                else:
+                    cell.alignment = left_align
 
         inv_total_row = len(dept_inv) + 2
         inv_total_qty = round(dept_inv['总数量'].sum(), 2)
         inv_total_amt = round(dept_inv['总出库金额'].sum(), 2)
         inv_total_avg = round(inv_total_amt / inv_total_qty, 2) if inv_total_qty != 0 else 0
-        inv_total_vals = ['合计', inv_total_qty, inv_total_avg, inv_total_amt]
+        inv_total_vals = ['合计', '', inv_total_qty, inv_total_avg, inv_total_amt]
         for ci, val in enumerate(inv_total_vals):
             c = summary_header_col + ci
             ws_dept.cell(row=inv_total_row, column=c, value=val)
@@ -384,7 +390,12 @@ def _generate_excel(df, summary, output_path):
             cell.font = total_font
             cell.fill = total_fill
             cell.border = thin_border
-            cell.alignment = center_align if ci == 0 else right_align
+            if ci == 0:
+                cell.alignment = center_align
+            elif ci == 1:
+                cell.alignment = center_align
+            else:
+                cell.alignment = right_align
 
         auto_width(ws_dept)
         ws_dept.freeze_panes = 'A2'
